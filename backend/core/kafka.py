@@ -25,6 +25,8 @@ class KafkaChunkProducer:
             retries=3,
             max_in_flight_requests_per_connection=1,
             enable_idempotence=True,
+            linger_ms=100,
+            compression_type="gzip",
         )
         self._topic = settings.kafka_topic_chunks
 
