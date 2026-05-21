@@ -29,8 +29,8 @@ class Chunk(Base):
     parent_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("chunks.id", ondelete="CASCADE"), nullable=True
     )
-    outbox_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("outbox.id"), nullable=False
+    outbox_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("outbox.id", ondelete="SET NULL"), nullable=True
     )
 
     heading_level: Mapped[str] = mapped_column(String(4), nullable=False)
