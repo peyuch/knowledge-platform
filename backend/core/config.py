@@ -68,6 +68,9 @@ class Settings(BaseSettings):
     graphrag_backup_llm_api_key: str = ""
     graphrag_backup_llm_model: str = "qwen-turbo"
 
+    # Reranker
+    reranker_model: str = "BAAI/bge-reranker-v2-m3"
+
     # App
     app_env: str = "development"
     log_level: str = "INFO"

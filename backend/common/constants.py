@@ -56,3 +56,15 @@ RAPTOR_TARGET_TOKENS_PER_CLUSTER = 1500
 RAPTOR_LLM_MAX_TOKENS = 600
 RAPTOR_LLM_BACKUP_TIMEOUT = 30
 RAPTOR_KAFKA_TOPIC = "knowledge.raptor.summaries"
+
+# --- Search ---
+RERANKER_MODEL = "BAAI/bge-reranker-v2-m3"
+SEARCH_MIN_SCORE_THRESHOLD = 0.01
+SEARCH_FUSION_WEIGHTS = {
+    "fact":    {"bm25": 0.6, "vector": 0.3, "graph": 0.1},
+    "concept": {"bm25": 0.1, "vector": 0.6, "graph": 0.3},
+    "rel":     {"bm25": 0.2, "vector": 0.3, "graph": 0.5},
+}
+SEARCH_DEFAULT_WEIGHTS = {"bm25": 0.2, "vector": 0.5, "graph": 0.3}
+SEARCH_ABSOLUTE_MIN_THRESHOLD = 0.4
+SEARCH_RERANKER_THRESHOLD = 0.3

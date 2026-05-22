@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 from starlette.responses import Response
 
-from api.routers import documents, tasks, index_dlq, graphrag_dlq
+from api.routers import documents, tasks, index_dlq, graphrag_dlq, search
 
 
 @asynccontextmanager
@@ -46,6 +46,7 @@ app.include_router(documents.router)
 app.include_router(tasks.router)
 app.include_router(index_dlq.router)
 app.include_router(graphrag_dlq.router)
+app.include_router(search.router)
 
 
 @app.get("/metrics")
