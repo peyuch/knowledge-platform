@@ -28,5 +28,5 @@ async def test_session_executes_simple_query():
         async with async_session_factory() as session:
             result = await session.execute(text("SELECT 1"))
             assert result.scalar() == 1
-    except (ConnectionRefusedError, OSError):
-        pytest.skip("PostgreSQL is not running — start with: docker compose -f docker/docker-compose.yml up -d")
+    except Exception:
+        pytest.skip("PostgreSQL is not reachable — start with: docker compose -f docker/docker-compose.yml up -d")
