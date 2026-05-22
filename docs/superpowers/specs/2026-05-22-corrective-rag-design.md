@@ -63,7 +63,7 @@ Response: {answer, citations, confidence, no_answer}
 ### 2.2 关键设计决策
 
 - **复用 #5 分数**：不重复调 Reranker。`score < 0.3` 直接丢弃
-- **Token 驱动贪婪填充**：不限条数，保证源多样性（Text≥2, Graph≥1）。若 Graph 结果为空则降级为 Text≥3，总量 ≤ 3K token
+- **Token 驱动贪婪填充**：按 score 降序，保证源多样性（Text≥2, Graph≥1），总量 ≤ 3K token。**防御规则**：若某类来源实际数量 < 配置下限（如 Graph 召回 0 条），自动放弃该类别的硬约束，安全降级为纯 score 降序填充，避免死循环或数组越界
 - **Few-Shot JSON 输出**：Prompt 含少样本示例，LLM 输出 `{"answer": "...", "citations": [{"chunk_id": "...", "quote": "..."}]}`
 - **三重幻觉防护**：格式解析 → chunk_id 存在性检查（`graph:*` 前缀的虚拟 ID 跳过检查，直接用关系的 sentence 验证）→ 引用与原文一致性验证
 - **分级拒答**：完全无匹配 / 部分匹配 / 低置信度三种策略
@@ -91,13 +91,13 @@ Response:
     {
       "chunk_id": "chunk-a1",
       "doc_id": "doc-001",
-      "page": 12,
+      "page_start": 12,
       "quote": "员工请假3天内由直属经理审批"
     },
     {
       "chunk_id": "chunk-a2",
       "doc_id": "doc-001",
-      "page": 12,
+      "page_start": 12,
       "quote": "超过3天需经总监审批"
     }
   ],

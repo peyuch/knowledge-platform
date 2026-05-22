@@ -143,9 +143,20 @@ Neo4j 图检索返回的是节点和边，不是文本 chunk。在入重排池�
 ### 2.5 分数归一化防御
 
 ```python
-def minmax_normalize(items, key):
+ABSOLUTE_MIN_THRESHOLD = 0.4  # 某路最高分低于此值 → 该路整体失效
+
+def minmax_normalize(items, key, source_name):
     vals = [r[key] for r in items]
-    vmin, vmax = min(vals), max(vals)
+    vmax = max(vals) if vals else 0
+
+    # 软边界: 若该路最高分都低于绝对阈值, 说明该路整体失效
+    # 不拉伸归一化, 直接整体乘惩罚系数 0.1, 防止"矮子里拔将军"
+    if vmax < ABSOLUTE_MIN_THRESHOLD:
+        for r in items:
+            r["_norm"] = r[key] * 0.1
+        return
+
+    vmin = min(vals)
     if vmax == vmin:                     # 防御: max==min
         for r in items: r["_norm"] = 0.5  # 全部赋中性分
         return
@@ -153,7 +164,7 @@ def minmax_normalize(items, key):
         r["_norm"] = (r[key] - vmin) / (vmax - vmin)
 ```
 
-备选：若 Min-Max 在极端场景效果差，可切换为 Z-score 归一化。
+备选：若 Min-Max 在极端场景效果差，可切换为 Z-score 归一化或 RRF（倒数排名融合）。
 
 ### 2.6 过滤条件透传
 
