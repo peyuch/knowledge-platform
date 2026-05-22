@@ -22,18 +22,7 @@ depends_on: Union[str, Sequence[str], None] = None
 def upgrade() -> None:
     """Upgrade schema."""
 
-    # --- ENUM types ---
-    taskstatus_enum = sa.Enum(
-        "pending", "parsing", "chunking", "storing", "done", "failed", "cancelled",
-        name="taskstatus",
-    )
-    taskstatus_enum.create(op.get_bind(), checkfirst=True)
-
-    chunkgranularity_enum = sa.Enum(
-        "LARGE", "SMALL",
-        name="chunkgranularity",
-    )
-    chunkgranularity_enum.create(op.get_bind(), checkfirst=True)
+    # ENUM types — created via table columns (SQLAlchemy auto-creates them).
 
     # --- batches ---
     op.create_table(

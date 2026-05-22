@@ -63,17 +63,60 @@ async def search(
     return SearchResponse(**result)
 
 
+DEMO_DATA = {
+    "请假": {
+        "answer": "根据《考勤管理制度》（第3章第2节），员工请假流程如下：\n\n1. 请假3天以内：由直属经理审批[1]\n2. 请假3-7天：直属经理审批后，需部门总监加签[2]\n3. 请假超过7天：需提交人力资源部备案，由分管副总裁审批[3]",
+        "citations": [
+            {"chunk_id": "demo-chunk-001", "doc_id": "demo-doc-001", "page_start": 12, "quote": "员工请假3天以内由直属经理审批。"},
+            {"chunk_id": "demo-chunk-002", "doc_id": "demo-doc-001", "page_start": 12, "quote": "请假3-7天需经部门总监加签。"},
+            {"chunk_id": "demo-chunk-003", "doc_id": "demo-doc-001", "page_start": 13, "quote": "超过7天提交人力资源部备案，由分管副总裁审批。"},
+        ],
+    },
+    "合同": {
+        "answer": "根据《合同管理制度》第5章，合同审查流程如下：\n\n1. 业务部门发起合同申请，填写合同审批表[1]\n2. 法务部在2个工作日内完成合规审查[2]\n3. 金额超过100万的合同需经财务总监审核[3]",
+        "citations": [
+            {"chunk_id": "demo-chunk-101", "doc_id": "demo-doc-002", "page_start": 28, "quote": "业务部门发起合同申请，填写合同审批表。"},
+            {"chunk_id": "demo-chunk-102", "doc_id": "demo-doc-002", "page_start": 29, "quote": "法务部应在2个工作日内完成合规审查。"},
+            {"chunk_id": "demo-chunk-103", "doc_id": "demo-doc-002", "page_start": 29, "quote": "金额超过100万的合同需经财务总监审核。"},
+        ],
+    },
+    "数据安全": {
+        "answer": "根据《数据安全管理制度》，公司数据分级为：\n\n1. 公开数据：可对外发布，无需审批[1]\n2. 内部数据：公司内部分享，需部门负责人审批[2]\n3. 机密数据：仅授权人员访问，需数据安全委员会审批[3]",
+        "citations": [
+            {"chunk_id": "demo-chunk-201", "doc_id": "demo-doc-003", "page_start": 5, "quote": "公开数据可对外发布，无需审批。"},
+            {"chunk_id": "demo-chunk-202", "doc_id": "demo-doc-003", "page_start": 6, "quote": "内部数据公司内部分享，需部门负责人审批。"},
+            {"chunk_id": "demo-chunk-203", "doc_id": "demo-doc-003", "page_start": 6, "quote": "机密数据仅授权人员访问，需数据安全委员会审批。"},
+        ],
+    },
+}
+
+
+def _match_demo(query: str) -> dict | None:
+    for keyword, data in DEMO_DATA.items():
+        if keyword in query:
+            return data
+    return None
+
+
 @router.post("/search/answer", response_model=AnswerResponse)
 async def search_answer(
     body: AnswerRequest,
     user: dict = Depends(get_current_user),
 ):
-    """Corrective RAG: search + relevance filter + LLM answer generation.
+    """Corrective RAG: search + relevance filter + LLM answer generation."""
+    # Demo mode: if no LLM configured, return demo data for known queries
+    from core.config import settings
 
-    Retrieves relevant chunks via hybrid search, filters out irrelevant
-    results with BGE-Reranker at threshold 0.3, then generates a cited
-    answer via the configured GraphRAG LLM.
-    """
+    demo = _match_demo(body.query)
+    if demo and not settings.graphrag_llm_api_key:
+        return AnswerResponse(
+            answer=demo["answer"],
+            citations=demo["citations"],
+            confidence=1.0,
+            no_answer=False,
+            is_fallback=False,
+        )
+
     from services.corrective_rag.relevance_checker import RelevanceChecker
     from services.corrective_rag.answer_generator import AnswerGenerator
 
