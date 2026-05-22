@@ -11,10 +11,16 @@ logger = logging.getLogger(__name__)
 
 class Reranker:
     def __init__(self, model_name: str = RERANKER_MODEL):
-        self.model = CrossEncoder(model_name)
-        # Warm-up to avoid cold-start latency on first call
-        self.model.predict([("warm up query", "warm up doc")])
-        logger.info(f"Reranker initialized with {model_name}")
+        self.model_name = model_name
+        self._model = None
+
+    @property
+    def model(self):
+        if self._model is None:
+            self._model = CrossEncoder(self.model_name)
+            self._model.predict([("warm up query", "warm up doc")])
+            logger.info(f"Reranker initialized with {self.model_name}")
+        return self._model
 
     def rerank(self, query: str, candidates: list[dict]) -> list[dict]:
         """Rerank candidates by relevance to query. Higher score = more relevant."""
@@ -22,7 +28,7 @@ class Reranker:
             return []
 
         pairs = [(query, c["content"]) for c in candidates]
-        scores = self.model.predict(pairs)
+        scores = self.model.predict(pairs)  # lazy-load on first call
 
         for c, s in zip(candidates, scores):
             c["score"] = float(s)
