@@ -105,12 +105,18 @@ Kafka chunk 到达
    → 三元组列表 [(entity, relation, entity), ...]
   │
   ▼
-3. Neo4j upsert (neo4j_store.py):
-   MERGE 每个实体节点:
-     SET :Entity:[具体类型], :PendingResolution
-     SET entity_id, name, embedding, confidence, ...
-   MERGE 关系:
-     SET relation_id, type, confidence, sentence, ...
+3. 批量 Embedding + Neo4j upsert (neo4j_store.py):
+   a. 收集所有去重实体名称 → 一次 batch_encode() → 384维矩阵
+   b. 使用 UNWIND 单 Cypher 语句批量写入:
+      UNWIND $entities AS e
+      MERGE (n:Entity:{type} {name: e.name})
+        ON CREATE SET n +={entity_id: e.entity_id, embedding: e.embedding, ...},
+                       n:PendingResolution
+        ON MATCH  SET n.embedding = e.embedding
+   c. 批量写入关系:
+      UNWIND $relations AS r
+      MERGE (a:Entity {entity_id: r.source})-[rel:{type}]->(b:Entity {entity_id: r.target})
+        SET rel +={relation_id: r.relation_id, confidence: r.confidence, sentence: r.sentence}
   │
   ▼
 4. Redis 计数: INCR raptor:graph:count:{doc_id}
@@ -129,15 +135,16 @@ Celery task: postprocess_doc(doc_id)
      a. 查 entity_normalization 字典 (PG)
         "CEO" → standard_name="首席执行官"
      b. 向量相似度: 同 type 实体间 COSINE 匹配
-        相似度 > 0.85 → 合并为同一实体
+        相似度 > GRAPHRAG_ENTITY_SIMILARITY_THRESHOLD → 合并为同一实体
      c. 指代消解: "该制度", "前述规定" → 解析为具体实体
   3. 生成归一化后的最终实体列表
-  4. 原子替换:
-     a. BEGIN TX
-     b. DELETE 该 doc 所有临时节点和关系
-     c. CREATE 最终节点 (无 :PendingResolution)
-     d. CREATE 最终关系 (合并重复关系)
-     e. COMMIT
+  4. 原子收尾 (避免物理 DELETE):
+     a. 对需要合并的节点: CALL apoc.refactor.mergeNodes(nodes, {properties: 'combine'})
+        (APOC 内置分段行锁, 消除跨文档死锁)
+     b. MATCH (e:PendingResolution {doc_id: $doc_id})
+        REMOVE e:PendingResolution
+        SET e.confidence = 1.0
+     c. 合并重复关系 (MERGE + SET)
   5. 更新 Redis (清理计数)
 ```
 
@@ -150,9 +157,13 @@ Celery Beat 凌晨 3:00
 1. 查询: 过去 24h 有更新的 doc_id (来自 ingestion_tasks)
 2. 对每个 doc:
    a. 获取完整 chunk 列表 (SMALL + LARGE, 按 sequence 排序)
-   b. 合并全文, 使用全局上下文调用 LLM 抽取
-   c. 生成最终图谱
-   d. 原子替换: 删旧图 → 写新图
+   b. 若总 token 数超过 LLM 上下文 → 按 100k token 分批抽取 → 合并三元组
+   c. 使用全局上下文调用 LLM 抽取
+   d. 生成全量最终图谱: 所有新节点加 :RebuildShadow 标签
+   e. 影子重建完全闭环后, 毫秒级原子切换:
+      MATCH (e {doc_id: $doc_id}) WHERE NOT e:RebuildShadow DETACH DELETE e;
+      MATCH (e:RebuildShadow {doc_id: $doc_id}) REMOVE e:RebuildShadow;
+      (检索层 #5 全程零感知, 查询绝不断流)
 3. 记录重建日志
 ```
 
@@ -172,6 +183,11 @@ Celery Beat 凌晨 3:00
 - Regulation: 外部法规/标准
 - Risk: 风险项
 - Document: 文件/附件
+
+重要约束:
+- 时间（如"2026年5月"、"本月"）必须作为事件或实体的属性（如 effective_date），严禁独立成节点
+- 具体数值指标（如"100万元"、"30天"）必须作为流程或制度的属性（如 sla_hours），严禁独立成节点
+- 如果一个实体会被超过 100 条关系连接，请优先将其作为属性而非节点
 
 关系类型（14种）:
 approves, reports_to, is_responsible_for, triggers, flows_to,
@@ -235,6 +251,8 @@ CREATE INDEX dept_name_idx   FOR (e:Dept) ON (e.name);
 
 CREATE INDEX entity_doc_id_idx FOR (e:Entity) ON (e.doc_id);
 CREATE INDEX entity_department_idx FOR (e:Entity) ON (e.department);
+CREATE INDEX pending_resolution_doc_idx FOR (e:PendingResolution) ON (e.doc_id);
+CREATE INDEX rebuild_shadow_doc_idx FOR (e:RebuildShadow) ON (e.doc_id);
 ```
 
 **节点属性（`:Entity` 基类）：**
@@ -283,17 +301,19 @@ CREATE INDEX entity_department_idx FOR (e:Entity) ON (e.department);
 ```cypher
 // 所有关系共用此 Schema
 {
-  relation_id:   STRING,       // UUID
-  type:          STRING,       // 见关系类型表
-  confidence:    FLOAT,
-  start_date:    STRING,       // 生效日期, null=未知
-  end_date:      STRING,       // 失效日期, null=永久有效
+  relation_id:         STRING,       // UUID
+  type:                STRING,       // 见关系类型表
+  source_entity_id:    STRING,       // 源实体 entity_id (用于唯一性约束)
+  target_entity_id:    STRING,       // 目标实体 entity_id
+  confidence:          FLOAT,
+  start_date:          STRING,       // 生效日期, null=未知
+  end_date:            STRING,       // 失效日期, null=永久有效
 
   // 溯源 (完整版)
-  chunk_id:      STRING,
-  doc_id:        STRING,
-  page_number:   INTEGER,
-  sentence:      STRING        // 原始句子片段
+  chunk_id:            STRING,
+  doc_id:              STRING,
+  page_number:         INTEGER,
+  sentence:            STRING        // 原始句子片段
 }
 ```
 
@@ -366,6 +386,10 @@ GRAPHRAG_REBUILD_LOOKBACK_HOURS = 24
 GRAPHRAG_DLQ_MAX_RETRY = 10
 GRAPHRAG_REDIS_TTL_SECONDS = 3600
 GRAPHRAG_KAFKA_TOPIC = "knowledge.ingestion.chunks"
+GRAPHRAG_EMBEDDING_BATCH_SIZE = 32
+GRAPHRAG_TX_TIMEOUT_SECONDS = 15
+GRAPHRAG_MERGE_RETRY_BACKOFF = 0.5
+GRAPHRAG_MAX_TOKENS_PER_BATCH = 100000
 ```
 
 ### config.py 新增
@@ -433,14 +457,10 @@ backend/
 ## 7. 自审清单
 
 - [x] 无 TODO / TBD / 未完成段落
-- [x] Neo4j 单库闭环：图 + 向量 + 属性 + 溯源，无分布式事务
-- [x] 多标签设计：`:Entity` + 具体标签，向量索引 + B-Tree 属性索引分离
-- [x] `:PendingResolution` 标签替代 `is_temporary` 布尔值
-- [x] sentence 溯源属性在关系上，节点保持轻量
-- [x] 无冗余反向关系，Cypher 双向遍历
-- [x] Date/Metric 不作为实体类型，改为属性
-- [x] 关系含 start_date/end_date 时间维度
-- [x] 实体归一化字典表 + 向量相似度 > 0.85 合并
-- [x] Redis 齐套触发后处理，无定时轮询
-- [x] 凌晨 3 点全量重建消除累积误差
-- [x] DLQ + 指数退避 + 管理接口
+- [x] Prompt 严格剔除 Date/Metric 实体类型，加约束防止超级节点
+- [x] 后处理用 REMOVE :PendingResolution + apoc.refactor.mergeNodes，避免 DELETE 跨文档死锁
+- [x] 实时路径批量 Embedding + UNWIND 单事务写入
+- [x] 全量重建用 :RebuildShadow 双缓冲标签，毫秒级原子切换，检索零感知
+- [x] :PendingResolution + :RebuildShadow 建索引，后处理查询加速
+- [x] 关系含 source_entity_id/target_entity_id，支持唯一性约束
+- [x] 大文档按 100k token 分批抽取
