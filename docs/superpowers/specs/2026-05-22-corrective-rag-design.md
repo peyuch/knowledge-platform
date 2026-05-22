@@ -36,32 +36,39 @@
 │  Corrective RAG Service              │
 │                                       │
 │  1. Relevance Check:                  │
-│     reranker.score(query, content)   │
+│     直接复用 #5 返回的 rerank_score  │
 │     → filter: score < 0.3 → discard  │
+│     (不重复调 Reranker, 避免算力翻倍) │
 │                                       │
-│  2. Context Assembly:                 │
-│     拼接通过筛选的 chunk (按 score   │
-│     降序, 最多 5 条, 总量 ≤ 3K token) │
+│  2. Context Assembly (Token驱动贪婪): │
+│     按 score 降序, 保证源多样性:     │
+│     - 至少 2 条 Text (bm25/vector)   │
+│     - 至少 1 条 Graph                │
+│     - 总量 ≤ 3K token, 不限条数      │
 │                                       │
-│  3. LLM Generation (DeepSeek):        │
-│     prompt = context + query          │
-│     + 强制溯源指令                    │
-│     → 答案 + 引用列表                 │
+│  3. LLM Generation + 三重幻觉防护:    │
+│     a. Few-Shot JSON 强制格式        │
+│     b. 输出后验证 chunk_id 存在性    │
+│     c. 验证引用与原文一致性           │
 │                                       │
-│  4. Hallucination Guard:              │
-│     答案中无引用时 → 拒绝回答         │
-│     "未找到相关信息, 请补充查询条件"    │
+│  4. 分级拒答:                         │
+│     - 完全无: "未找到相关信息"        │
+│     - 部分: 回答+标注"未找到XX信息"   │
+│     - 低置信度: 回答+标注             │
 └──────────────┬───────────────────────┘
                ▼
-Response: {answer, citations: [{chunk_id, doc_id, page, quote}]}
+Response: {answer, citations, confidence, no_answer}
 ```
 
 ### 2.2 关键设计决策
 
-- **Relevance 阈值 = 0.3**：BGE-Reranker 打分，低于 0.3 的 chunk 认为不相关
-- **最多 5 条 context**：控制 LLM 上下文大小和 API 成本
-- **强制溯源 prompt**：LLM 必须为每个断言标注 `[ref: chunk_id]`
-- **拒答机制**：无匹配来源时拒绝编造
+- **复用 #5 分数**：不重复调 Reranker。`score < 0.3` 直接丢弃
+- **Token 驱动贪婪填充**：不限条数，保证源多样性（Text≥2, Graph≥1），总量 ≤ 3K token
+- **Few-Shot JSON 输出**：Prompt 含少样本示例，LLM 输出 `{"answer": "...", "citations": [{"chunk_id": "...", "quote": "..."}]}`
+- **三重幻觉防护**：格式解析 → chunk_id 存在性检查 → 引用与原文一致性验证
+- **分级拒答**：完全无匹配 / 部分匹配 / 低置信度三种策略
+- **LLM 重试 + fallback**：3次退避重试 → 备用 LLM → 降级返回检索结果
+- **confidence = avg(引用chunk的rerank_score)**
 
 ---
 

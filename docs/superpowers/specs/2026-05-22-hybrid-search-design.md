@@ -80,7 +80,7 @@ Response: [{content, chunk_id, doc_id, score, source}, ...]
 - **查询分类用规则 + LLM 兜底**：先关键词匹配（"谁/负责/审批/流程"），无法判断时用轻量 prompt 调用 LLM 分类
 - **三路并行**：`asyncio.gather()` 并发执行，总耗时 = max(各路耗时)
 - **分数归一化**：每路用 Min-Max归一化，然后加权求和
-- **Reranker 复用 sentence-transformer 实例**
+- **Reranker 独立加载**：`CrossEncoder` 与 `SentenceTransformer` 是不同的类，无法共享实例。Reranker 独立加载 `BAAI/bge-reranker-v2-m3`。v1 进程内运行，v2 拆为独立 TEI/gRPC 微服务。
 
 ---
 
@@ -107,8 +107,10 @@ Response:
       "content": "员工请假需经部门经理审批...",
       "chunk_id": "uuid",
       "doc_id": "uuid",
+      "page_start": 12,
       "score": 0.92,
-      "source": "vector"              // "bm25" | "vector" | "graph"
+      "source": "vector",             // "bm25" | "vector" | "graph"
+      "heading_path": ["考勤管理制度", "第3章 请假"]
     }
   ],
   "query_analysis": {
@@ -119,6 +121,43 @@ Response:
   "took_ms": 245
 }
 ```
+
+---
+
+### 2.4 Graph-to-Text 翻译
+
+Neo4j 图检索返回的是节点和边，不是文本 chunk。在入重排池前必须翻译：
+
+```python
+# hybrid_searcher.py — _graph_search()
+# 1. Cypher 实体链接 + 2跳邻居
+# 2. 收集每条关系的 sentence 属性 (溯源原文)
+# 3. 组装为结构化文本:
+#    "[图谱关联] {entity1} 与 {entity2} 存在 {relation} 关系。
+#     证据句: {sentence}"
+# 4. 赋予虚拟 chunk_id = f"graph:{entity1_id}:{entity2_id}"
+# 5. 赋予 score = relation.confidence
+# 6. 压入融合池
+```
+
+### 2.5 分数归一化防御
+
+```python
+def minmax_normalize(items, key):
+    vals = [r[key] for r in items]
+    vmin, vmax = min(vals), max(vals)
+    if vmax == vmin:                     # 防御: max==min
+        for r in items: r["_norm"] = 0.5  # 全部赋中性分
+        return
+    for r in items:
+        r["_norm"] = (r[key] - vmin) / (vmax - vmin)
+```
+
+备选：若 Min-Max 在极端场景效果差，可切换为 Z-score 归一化。
+
+### 2.6 过滤条件透传
+
+所有 filters（`department`, `file_type`, `date_range`）必须透传到 ES、Milvus、Neo4j 三路。在检索阶段就过滤，不是事后裁剪。
 
 ---
 
