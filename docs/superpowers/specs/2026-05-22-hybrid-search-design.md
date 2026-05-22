@@ -135,7 +135,7 @@ Neo4j 图检索返回的是节点和边，不是文本 chunk。在入重排池�
 # 3. 组装为结构化文本:
 #    "[图谱关联] {entity1} 与 {entity2} 存在 {relation} 关系。
 #     证据句: {sentence}"
-# 4. 赋予虚拟 chunk_id = f"graph:{entity1_id}:{entity2_id}"
+# 4. 赋予虚拟 chunk_id = f"graph:{relation_id}" (在 #6 幻觉防护中: graph:* 前缀跳过 chunks 表存在性检查, 直接用 relation.sentence 验证)
 # 5. 赋予 score = relation.confidence
 # 6. 压入融合池
 ```

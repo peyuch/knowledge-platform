@@ -63,9 +63,9 @@ Response: {answer, citations, confidence, no_answer}
 ### 2.2 关键设计决策
 
 - **复用 #5 分数**：不重复调 Reranker。`score < 0.3` 直接丢弃
-- **Token 驱动贪婪填充**：不限条数，保证源多样性（Text≥2, Graph≥1），总量 ≤ 3K token
+- **Token 驱动贪婪填充**：不限条数，保证源多样性（Text≥2, Graph≥1）。若 Graph 结果为空则降级为 Text≥3，总量 ≤ 3K token
 - **Few-Shot JSON 输出**：Prompt 含少样本示例，LLM 输出 `{"answer": "...", "citations": [{"chunk_id": "...", "quote": "..."}]}`
-- **三重幻觉防护**：格式解析 → chunk_id 存在性检查 → 引用与原文一致性验证
+- **三重幻觉防护**：格式解析 → chunk_id 存在性检查（`graph:*` 前缀的虚拟 ID 跳过检查，直接用关系的 sentence 验证）→ 引用与原文一致性验证
 - **分级拒答**：完全无匹配 / 部分匹配 / 低置信度三种策略
 - **LLM 重试 + fallback**：3次退避重试 → 备用 LLM → 降级返回检索结果
 - **confidence = avg(引用chunk的rerank_score)**
@@ -108,15 +108,33 @@ Response:
 
 ---
 
-## 4. LLM Prompt
+## 4. LLM Prompt (JSON Schema 强约束)
 
 ```
 你是一个企业知识库问答助手。请根据以下检索到的文档片段回答用户问题。
-每个断言必须标注引用来源 [ref: chunk_id]。
+你必须输出标准 JSON, 格式如下:
+
+{"answer": "你的回答", "citations": [{"chunk_id": "...", "quote": "原文引用"}]}
 
 规则:
 1. 只使用提供的文档片段, 不要编造任何信息
-2. 无法找到答案时, 回复 "未找到相关信息, 请补充查询条件"
+2. 每个断言在 answer 中用 [1], [2] 上标标注, 对应 citations 数组索引
+3. 无法找到答案时: {"answer": "未找到相关信息, 请补充查询条件", "citations": []}
+4. 部分找到时: 回答有答案的部分, 在 answer 末尾加注 "【注意】未找到关于XX的信息"
+
+少样本示例:
+输入: "请假流程谁审批？"
+输出: {"answer": "员工请假3天内由直属经理审批[1], 超过3天需总监审批[2]。", "citations": [{"chunk_id": "c-101", "quote": "员工请假3天内由直属经理审批"}, {"chunk_id": "c-102", "quote": "超过3天需经总监审批"}]}
+
+文档片段:
+---
+{contexts}
+---
+
+问题: {query}
+
+JSON 输出:
+```
 3. 答案末尾列出所有引用的 chunk_id
 
 文档片段:

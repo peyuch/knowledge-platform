@@ -67,8 +67,11 @@
 - 所有端点强制 JWT Bearer Token（已有 #1 的 `dependencies.get_current_user`）
 - RBAC：`admin` 可访问 DLQ/管理端点，`viewer` 仅可访问查询端点
 - 限流：普通用户 10 QPS，管理端点 100 QPS，上传 5 QPS
+- **LLM 并发控制**：`/search/answer` 单用户最大并发 2，全局最大并发 20。超限返回 429
+- **LLM 首字超时 8s**：超时立即触发降级，不白等 30s
 - LLM 熔断：连续 5 次失败 → 熔断 60s → half-open 探测
-- LLM 不可用时 `/search/answer` 降级返回检索结果
+- LLM 不可用时 `/search/answer` 降级返回检索结果 + `is_fallback: true`
+- AnswerResponse 增加 `is_fallback: bool` 字段，前端据此提示用户"AI生成超时，已切换为精准搜索"
 
 ---
 
@@ -94,15 +97,39 @@
 
 ---
 
-## 3. 目录结构增量
+## 6. 可观测性
+
+- **结构化日志**：`request_id`, `user_id`, `module`, `latency`, `error_code`
+- **Prometheus 指标**：`api_requests_total`(端点/状态码/角色), `api_request_duration_seconds`, `llm_requests_total`(模型/状态), `llm_request_duration_seconds`, `search_recall_count`(来源)
+- **分布式追踪**：OpenTelemetry 贯穿 API → 检索 → LLM 全链路
+
+## 7. CORS 配置
+
+已在 #1 `api/main.py` 配置（`allow_origins=["*"]` 开发模式，生产改为具体域名）。
+
+---
+
+## 8. 目录结构增量
+
+```
+```
+依赖链（胶水层模式）:
+  api/routers/search.py     ← 统一路由网关, 不写业务逻辑
+    │
+    ├─ POST /search → services/search/search_service.py (纯检索)
+    │
+    └─ POST /search/answer → services/search/search_service.py → services/corrective_rag/answer_generator.py
+                              (#6 接收 #5 的干净检索结果, 不自调检索, 避免循环依赖)
+```
 
 ```
 backend/
 ├── api/main.py                       # MODIFY: 注册 search router
 ├── api/routers/
-│   └── search.py                     # NEW/MODIFY: POST /search, /search/answer
+│   └── search.py                     # NEW/MODIFY: POST /search, /search/answer (胶水层)
 └── schemas/
-    └── search.py                     # NEW/MODIFY: SearchRequest, SearchResponse, AnswerRequest, AnswerResponse
+    └── search.py                     # NEW/MODIFY: 共享 DTO
+```
 ```
 
 ---
