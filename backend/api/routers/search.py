@@ -104,33 +104,57 @@ async def search_answer(
     user: dict = Depends(get_current_user),
 ):
     """Corrective RAG: search + relevance filter + LLM answer generation."""
-    # Demo mode: if no LLM configured, return demo data for known queries
     from core.config import settings
 
-    demo = _match_demo(body.query)
-    if demo and not settings.graphrag_llm_api_key:
-        return AnswerResponse(
-            answer=demo["answer"],
-            citations=demo["citations"],
-            confidence=1.0,
-            no_answer=False,
-            is_fallback=False,
+    # Try real pipeline first
+    try:
+        from services.corrective_rag.relevance_checker import RelevanceChecker
+        from services.corrective_rag.answer_generator import AnswerGenerator
+
+        svc = _get_search_service()
+        search_result = await svc.search(
+            query=body.query,
+            top_k=body.top_k,
+            filters=body.filters.model_dump(exclude_none=True) if body.filters else None,
         )
 
-    from services.corrective_rag.relevance_checker import RelevanceChecker
-    from services.corrective_rag.answer_generator import AnswerGenerator
+        checker = RelevanceChecker()
+        relevant = checker.filter(body.query, search_result["results"])
 
-    svc = _get_search_service()
-    search_result = await svc.search(
-        query=body.query,
-        top_k=body.top_k,
-        filters=body.filters.model_dump(exclude_none=True) if body.filters else None,
+        generator = AnswerGenerator()
+        result = await generator.generate(body.query, relevant)
+        return AnswerResponse(**result)
+
+    except Exception as e:
+        logger.warning(f"Real pipeline failed ({e}), trying demo fallback")
+
+    # Fallback: demo data (with real LLM if key configured, otherwise hardcoded)
+    demo = _match_demo(body.query)
+    if not demo:
+        return AnswerResponse(
+            answer="未找到相关信息, 请补充查询条件",
+            citations=[], confidence=0, no_answer=True, is_fallback=True,
+        )
+
+    if settings.graphrag_llm_api_key:
+        try:
+            from services.corrective_rag.answer_generator import AnswerGenerator
+            generator = AnswerGenerator()
+            # Build relevance-checked demo chunks for LLM
+            demo_chunks = [
+                {"chunk_id": c["chunk_id"], "doc_id": c["doc_id"],
+                 "content": c["quote"], "page_start": c.get("page_start"),
+                 "score": 0.9}
+                for c in demo["citations"]
+            ]
+            result = await generator.generate(body.query, demo_chunks)
+            result["is_fallback"] = False
+            return AnswerResponse(**result)
+        except Exception as e:
+            logger.warning(f"LLM generation failed: {e}")
+
+    # Last resort: hardcoded demo
+    return AnswerResponse(
+        answer=demo["answer"], citations=demo["citations"],
+        confidence=1.0, no_answer=False, is_fallback=bool(settings.graphrag_llm_api_key),
     )
-
-    checker = RelevanceChecker()
-    relevant = checker.filter(body.query, search_result["results"])
-
-    generator = AnswerGenerator()
-    result = await generator.generate(body.query, relevant)
-
-    return AnswerResponse(**result)

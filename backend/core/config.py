@@ -47,11 +47,15 @@ class Settings(BaseSettings):
     index_metrics_port: int = 9090
     index_embed_batch_size: int = 64
 
+    # LLM — read from environment: $env:DEEPSEEK_API_KEY / $env:DASHSCOPE_API_KEY
+    deepseek_api_key: str = ""
+    dashscope_api_key: str = ""
+
     # RAPTOR
-    raptor_llm_api_url: str = ""
+    raptor_llm_api_url: str = "https://api.deepseek.com"
     raptor_llm_api_key: str = ""
     raptor_llm_model: str = "deepseek-chat"
-    raptor_backup_llm_api_url: str = ""
+    raptor_backup_llm_api_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     raptor_backup_llm_api_key: str = ""
     raptor_backup_llm_model: str = "qwen-turbo"
 
@@ -60,13 +64,24 @@ class Settings(BaseSettings):
     neo4j_user: str = "neo4j"
     neo4j_password: str = "password"
 
-    # GraphRAG
-    graphrag_llm_api_url: str = ""
+    # GraphRAG (also used by Corrective RAG)
+    graphrag_llm_api_url: str = "https://api.deepseek.com"
     graphrag_llm_api_key: str = ""
     graphrag_llm_model: str = "deepseek-chat"
-    graphrag_backup_llm_api_url: str = ""
+    graphrag_backup_llm_api_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     graphrag_backup_llm_api_key: str = ""
     graphrag_backup_llm_model: str = "qwen-turbo"
+
+    def model_post_init(self, __context):
+        """Auto-fill LLM keys from top-level env vars if not explicitly set."""
+        if not self.raptor_llm_api_key:
+            self.raptor_llm_api_key = self.deepseek_api_key
+        if not self.raptor_backup_llm_api_key:
+            self.raptor_backup_llm_api_key = self.dashscope_api_key
+        if not self.graphrag_llm_api_key:
+            self.graphrag_llm_api_key = self.deepseek_api_key
+        if not self.graphrag_backup_llm_api_key:
+            self.graphrag_backup_llm_api_key = self.dashscope_api_key
 
     # Reranker
     reranker_model: str = "BAAI/bge-reranker-v2-m3"
