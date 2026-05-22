@@ -46,7 +46,7 @@ def publish_pending_outbox(db: Session) -> int:
         return 0
 
     kafka = get_kafka()
-    messages = [record.payload for record in unpublished]
+    messages = [(str(record.aggregate_id), record.payload) for record in unpublished]
     kafka.send_batch(messages)
 
     now = datetime.now(timezone.utc)
