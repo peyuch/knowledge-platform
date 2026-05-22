@@ -33,6 +33,41 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 1440
 
+    # Elasticsearch
+    es_url: str = "http://localhost:9200"
+
+    # Milvus
+    milvus_db_path: str = "data/milvus.db"
+
+    # Index Consumer
+    index_batch_size: int = 200
+    index_batch_timeout: float = 3.0
+    index_buffer_max_size: int = 2000
+    index_kafka_group_id: str = "indexing-v1"
+    index_metrics_port: int = 9090
+    index_embed_batch_size: int = 64
+
+    # RAPTOR
+    raptor_llm_api_url: str = ""
+    raptor_llm_api_key: str = ""
+    raptor_llm_model: str = "deepseek-chat"
+    raptor_backup_llm_api_url: str = ""
+    raptor_backup_llm_api_key: str = ""
+    raptor_backup_llm_model: str = "qwen-turbo"
+
+    # Neo4j
+    neo4j_uri: str = "bolt://localhost:7687"
+    neo4j_user: str = "neo4j"
+    neo4j_password: str = "password"
+
+    # GraphRAG
+    graphrag_llm_api_url: str = ""
+    graphrag_llm_api_key: str = ""
+    graphrag_llm_model: str = "deepseek-chat"
+    graphrag_backup_llm_api_url: str = ""
+    graphrag_backup_llm_api_key: str = ""
+    graphrag_backup_llm_model: str = "qwen-turbo"
+
     # App
     app_env: str = "development"
     log_level: str = "INFO"

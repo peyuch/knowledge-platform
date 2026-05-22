@@ -71,3 +71,44 @@ def get_kafka() -> KafkaChunkProducer:
     if _kafka_producer is None:
         _kafka_producer = KafkaChunkProducer()
     return _kafka_producer
+
+
+# ------------------------------------------------------------------
+# RAPTOR producer (separate topic)
+# ------------------------------------------------------------------
+
+class KafkaRaptorProducer:
+    """Kafka producer specialised for publishing RAPTOR summary records."""
+
+    def __init__(self) -> None:
+        self._producer = KafkaProducer(
+            bootstrap_servers=settings.kafka_bootstrap_servers.split(","),
+            value_serializer=lambda v: json.dumps(v).encode("utf-8"),
+            key_serializer=lambda k: k.encode("utf-8") if k else None,
+            acks="all",
+            retries=3,
+            max_in_flight_requests_per_connection=1,
+            enable_idempotence=True,
+            linger_ms=100,
+            compression_type="gzip",
+        )
+        self._topic = "knowledge.raptor.summaries"
+
+    def send_single(self, key: str | None, value: dict) -> None:
+        """Send a single message to the RAPTOR topic."""
+        self._producer.send(self._topic, key=key, value=value).get(timeout=30)
+
+    def close(self) -> None:
+        self._producer.flush(timeout=30)
+        self._producer.close(timeout=30)
+
+
+_raptor_producer: KafkaRaptorProducer | None = None
+
+
+def get_raptor_kafka() -> KafkaRaptorProducer:
+    """Return the module-level KafkaRaptorProducer singleton."""
+    global _raptor_producer
+    if _raptor_producer is None:
+        _raptor_producer = KafkaRaptorProducer()
+    return _raptor_producer

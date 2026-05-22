@@ -10,6 +10,10 @@ from models.ingestion_task import IngestionTask
 from models.chunk import Chunk
 from models.outbox import Outbox
 from models.audit_log import AuditLog
+from models.dead_letter_index import DeadLetterIndex
+from models.entity_normalization import EntityNormalization
+from models.dead_letter_graphrag import DeadLetterGraphrag
+from models.raptor_node import RaptorNode
 
 __all__ = [
     "Base",
@@ -19,4 +23,8 @@ __all__ = [
     "Chunk",
     "Outbox",
     "AuditLog",
+    "DeadLetterIndex",
+    "EntityNormalization",
+    "DeadLetterGraphrag",
+    "RaptorNode",
 ]

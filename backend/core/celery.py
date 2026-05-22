@@ -1,6 +1,7 @@
 """Celery application instance with GPU/CPU queue definitions."""
 
 from celery import Celery
+from celery.schedules import crontab
 
 from core.config import settings
 
@@ -14,6 +15,10 @@ app = Celery(
         "workers.outbox_poller",
         "workers.heartbeat_checker",
         "workers.orphan_checker",
+        "workers.dlq_retry",
+        "workers.graph_postprocessor",
+        "workers.graph_rebuilder",
+        "workers.raptor_timeout_scanner",
     ],
 )
 
@@ -45,6 +50,18 @@ app.conf.update(
         "orphan-check": {
             "task": "workers.orphan_checker.check_orphans",
             "schedule": 300.0,
+        },
+        "retry-dlq": {
+            "task": "workers.dlq_retry.retry_dlq_records",
+            "schedule": crontab(hour=2, minute=0),  # Daily at 2am
+        },
+        "graphrag-rebuild": {
+            "task": "workers.graph_rebuilder.rebuild_recent_docs",
+            "schedule": crontab(hour=3, minute=0),
+        },
+        "raptor-timeout-scan": {
+            "task": "workers.raptor_timeout_scanner.scan_timeouts",
+            "schedule": 600.0,  # every 10 minutes
         },
     },
     broker_connection_retry_on_startup=True,
