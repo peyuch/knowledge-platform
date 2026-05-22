@@ -16,12 +16,12 @@
 
 **本期包含：**
 - 独立 Kafka Consumer 进程（非 Celery），消费 `granularity=LARGE` 的 chunk
-- 增量流式构建：来一个 LARGE chunk → 创建 level=0 节点 → 增量聚类到最相似簇 → 更新受影响的上层摘要
-- 离线全量重构建：Celery Beat 每天凌晨 2 点，对过去 24 小时更新的文档全量重建 RAPTOR 树
-- k-means++ 聚类（K = `total_tokens / 1500`，`random_state=42` 保证可复现）
-- 固定最大深度 3 层 + `total_tokens < 1000` 自适应截断
+- **Redis 计数齐套触发 + 超时兜底**：等一个 doc 的所有 LARGE chunk 到齐后一次性构建 RAPTOR 树；超时未到齐则用已有 chunk 构建
+- UMAP 降维（384→5 维）+ GMM 软聚类（概率隶属，一个 chunk 可同时属多个簇）
+- 固定最大深度 3 层 + 自底向上 Token 规模拦截（level=0 时若所有节点 token 已 < 阈值，直接不聚类）
 - 远程 LLM API 摘要生成（主用 DeepSeek，备用通义千问）
-- 存储：PostgreSQL `raptor_nodes` 表 + 通过 Kafka `knowledge.raptor.summaries` 推给 #2 落 Milvus（单一 `chunks` collection，`granularity=SUMMARY`）
+- 存储：PostgreSQL `raptor_nodes` 表 + 通过 Kafka `knowledge.raptor.summaries` 推给 #2 落 Milvus
+- Kafka 消息含 `action` 字段（`updated` / `deleted`），#2 mini-consumer 按 action 执行 upsert 或 delete
 - SMALL chunk 通过 `parent_id` 挂载到对应 LARGE 节点，检索时由 #5 动态组合
 
 **本期不包含：**
@@ -80,8 +80,9 @@
 ### 2.2 关键设计决策
 
 - **RAPTOR 不直接写 Milvus**：避免 Milvus Lite 多进程锁死。摘要节点推入 Kafka `knowledge.raptor.summaries`，由 #2 的 mini-consumer 统一落 Milvus（单一 `chunks` collection，`granularity=SUMMARY`）。
-- **增量流式 + 全量重构建**：实时来一个 LARGE chunk 就增量挂载并更新上游摘要；凌晨 2 点对 24h 内更新过的文档全量重建，消除增量累积误差。
-- **k-means++ 固定随机种子**：K = `total_tokens / 1500`（工业界黄金标准），`random_state=42` 保证可复现。
+- **Redis 齐套触发 + 超时兜底**：Consumer 将 LARGE chunk 缓存在 Redis 中，按 doc_id 计数。当计数等于 `chunk_count`（文档总 chunk 数）时触发一次性全量构建。超时（默认 30 分钟）后不论到齐与否都用已有 chunk 构建，避免丢失 chunk 导致永不等齐。
+- **UMAP + GMM 软聚类**：UMAP 将 384 维向量降到 5 维（抵消 GMM 计算开销），GMM 输出概率隶属——一个 chunk 可同时以不同概率属于多个簇，嵌入多份 LLM 摘要中。解决企业文档"一节多意"问题。
+- **自底向上 Token 拦截**：level=0 时若所有节点 token 总量 < 1000 → 直接不聚类，文档原文即为最终节点。避免短文档生成无意义的"复读机"摘要。
 - **单一索引 + 逻辑隔离**：ES 和 Milvus 各自只维护一个 index/collection，用 `granularity` 字段（SMALL / LARGE / SUMMARY）内部区分，检索端统一过滤。
 - **RAPTOR 不管 ES**：摘要节点不做 BM25 全文索引，只存 Milvus 向量 + PG 树结构。全文检索完全由 SMALL chunk 覆盖。
 - **#2 不消费 RAPTOR 事件**：#2 的 mini-consumer 把 SUMMARY 落 Milvus，但不落 ES。#5 检索层分别查 #2 的 SMALL（原文）和 #3 的 SUMMARY（摘要），再统一重排。
@@ -90,70 +91,106 @@
 
 ## 3. 数据流
 
-### 3.1 增量流式构建（实时路径）
+### 3.1 Redis 齐套触发构建（主路径）
 
 ```
 Kafka: granularity=LARGE chunk 到达
   │
   ▼
-1. 创建 level=0 节点 (叶子, 内容=原文 LARGE chunk)
-2. 存入 raptor_nodes (PG)
-3. 推送 knowledge.raptor.summaries (granularity=LARGE, 供 #2 落 Milvus)
+1. 存入 Redis:
+   RPUSH raptor:buffer:{doc_id} {chunk_json}
+   INCR raptor:count:{doc_id}
+   EXPIRE raptor:buffer:{doc_id} 3600       # 1h TTL
   │
   ▼
-4. 增量聚类:
-   a. 获取该文档当前层所有节点的 embedding
-   b. 计算 k = max(2, min(10, total_tokens / 1500))
-   c. k-means++ 聚类 (random_state=42)
+2. 检查是否齐套:
+   if count == chunk_meta.total_chunk_count:  # 从消息 metadata 获取
+      → 触发构建
   │
   ▼
-5. 对每个簇:
-   a. 如果簇有变化 → 重新调用 LLM 生成簇摘要
-   b. 更新/创建 level+1 节点
-   c. 存入 raptor_nodes + 推送 Kafka
-  │
-  ▼
-6. 递归: 对新生成的 level+1 节点, 重复步骤 4-5
-   直到 should_stop() 返回 True
+3. 一次性全量构建:
+   a. LRANGE raptor:buffer:{doc_id} 0 -1 → 获取全量 LARGE chunk
+   b. DEL raptor:buffer:{doc_id} raptor:count:{doc_id}  # 清理 Redis
+   c. 创建全部 level=0 节点 (每个 LARGE chunk 一个)
+   d. embedding → UMAP(5维) → GMM 软聚类
+   e. 对每个簇调用 LLM 生成 level=1 摘要
+   f. 递归聚类 → 摘要 → level=2 → ... → 直到 should_stop()
+   g. INSERT raptor_nodes (PG) + 推送 Kafka (action="updated")
 ```
 
-### 3.2 离线全量重构建
+### 3.2 超时兜底构建
 
 ```
-Celery Beat 凌晨 2:00
+Celery Beat 每 10 分钟扫描:
   │
   ▼
-1. 查询 PG: 过去 24h 有更新的 doc_id 列表
-2. 删除这些 doc 的旧 RAPTOR 节点 (level ≥ 1, 保留 level=0 叶子)
-3. 重新获取所有 level=0 节点的 embedding
-4. 执行 k-means++ 聚类 → LLM 摘要 → 上层节点
-5. 深度 ≤ 3, total_tokens < 1000 停止
-6. 更新 raptor_nodes → 推送 Kafka 更新下游
+1. SCAN Redis: raptor:count:{doc_id} 中创建时间 > 30 分钟的
+2. 不论 count 是否等于 total_chunk_count, 强制触发构建
+3. 适用场景: 部分 LARGE chunk 丢失 (MinerU 解析失败等),
+   防止文档永远无法构建 RAPTOR 树
 ```
 
 ### 3.3 聚类算法
 
 ```python
-TARGET_TOKENS_PER_CLUSTER = 1500
+import numpy as np
+from umap import UMAP
+from sklearn.mixture import GaussianMixture
+
 MAX_RAPTOR_DEPTH = 3
 STOP_CLUSTERING_TOKEN_THRESHOLD = 1000
+UMAP_N_COMPONENTS = 5                    # 降至5维, 抵消GMM计算开销
 
-def calculate_optimal_k(nodes: list[dict]) -> int:
-    total = sum(n["token_count"] for n in nodes)
-    return max(2, min(10, int(total / TARGET_TOKENS_PER_CLUSTER)))
+def build_raptor_tree(nodes: list[dict], doc_id: str) -> None:
+    """自底向上构建 RAPTOR 树。"""
+    # ═══ 自底向上 Token 拦截 ═══
+    total_tokens = sum(n["token_count"] for n in nodes)
+    if total_tokens < STOP_CLUSTERING_TOKEN_THRESHOLD:
+        # 文档本身已足够短, 不再聚类, level=0 就是最终节点
+        return
 
-def cluster_nodes(embeddings: list[list[float]], k: int) -> list[int]:
-    from sklearn.cluster import KMeans
-    return KMeans(
-        n_clusters=k,
-        init="k-means++",
-        n_init=10,
-        random_state=42,
-        tol=1e-4,
-    ).fit_predict(embeddings)
+    _cluster_and_summarize(nodes, level=0, doc_id=doc_id)
 
-def should_stop_clustering(current_level: int, nodes: list[dict]) -> bool:
-    if current_level >= MAX_RAPTOR_DEPTH:
+
+def _cluster_and_summarize(nodes: list[dict], level: int, doc_id: str) -> list[dict]:
+    if _should_stop(level, nodes):
+        return nodes
+
+    embeddings = np.array([n["embedding"] for n in nodes])
+
+    # 1. UMAP 降维 (384 → 5)
+    reducer = UMAP(n_components=UMAP_N_COMPONENTS, random_state=42)
+    reduced = reducer.fit_transform(embeddings)
+
+    # 2. GMM 软聚类 — 输出概率矩阵 P[i][k] = 节点i属于簇k的概率
+    n_components = max(2, min(10, int(sum(n["token_count"] for n in nodes) / 1500)))
+    gmm = GaussianMixture(n_components=n_components, random_state=42)
+    gmm.fit(reduced)
+    probs = gmm.predict_proba(reduced)   # shape: (N, K)
+
+    # 3. 软分配: probability > 0.2 的节点即属于该簇 (一个节点可属多个簇)
+    threshold = 0.2
+    summary_nodes = []
+    for k in range(n_components):
+        cluster_nodes = [
+            nodes[i] for i in range(len(nodes))
+            if probs[i][k] >= threshold
+        ]
+        if len(cluster_nodes) < 2:
+            continue  # 单节点簇不摘要
+
+        summary_text = summarize_cluster(cluster_nodes)
+        node = create_summary_node(cluster_nodes, summary_text, level + 1, k)
+        summary_nodes.append(node)
+
+    # 4. 递归上层
+    if summary_nodes:
+        return _cluster_and_summarize(summary_nodes, level + 1, doc_id)
+    return nodes
+
+
+def _should_stop(level: int, nodes: list[dict]) -> bool:
+    if level >= MAX_RAPTOR_DEPTH:
         return True
     if len(nodes) < 2:
         return True
@@ -187,13 +224,18 @@ async def summarize_cluster(nodes: list[dict], llm_client) -> str:
 
 ```
 #3 RAPTOR Consumer → Kafka knowledge.raptor.summaries
-                              │
-                              ▼
-                    #2 Index Consumer 内的 mini-consumer 线程
-                      │
-                      ├─ content → embedder.encode() → vector
-                      ├─ milvus.upsert(vector, pk=chunk_id, granularity=SUMMARY)
-                      └─ ES: 不写入 (RAPTOR 不需要 BM25)
+                         │ 每条消息含 action 字段:
+                         │   "updated" — 新增/覆盖
+                         │   "deleted" — 删除
+                         ▼
+               #2 Index Consumer 内的 mini-consumer 线程
+                 │
+                 ├─ action="updated":
+                 │    content → embed → milvus.upsert(pk=chunk_id, granularity=SUMMARY)
+                 │    ES: 不写入 (RAPTOR 不需要 BM25)
+                 │
+                 └─ action="deleted":
+                      milvus.delete(expr=f'chunk_id == "{chunk_id}"')
 ```
 
 ---
@@ -235,14 +277,15 @@ CREATE INDEX idx_raptor_cluster  ON raptor_nodes(doc_id, level, cluster_label);
 
 ```
 knowledge.raptor.summaries
-  消息格式 (与 knowledge.ingestion.chunks 兼容):
+  消息格式:
   {
+    "action": "updated",               // "updated" | "deleted"
     "event": "raptor.node_updated",
     "chunk_id": "uuid",
     "doc_id": "uuid",
     "parent_id": "uuid | null",
     "heading_level": "SUMMARY",
-    "granularity": "SUMMARY",           # #2 mini-consumer 通过此字段识别
+    "granularity": "SUMMARY",           // #2 mini-consumer 通过此字段识别
     "heading_path": ["第1层摘要", "簇3"],
     "content": "该章节描述了...",
     "content_hash": "md5...",
@@ -270,11 +313,12 @@ knowledge.raptor.summaries
 ### constants.py 新增
 
 ```python
-RAPTOR_TARGET_TOKENS_PER_CLUSTER = 1500
 RAPTOR_MAX_DEPTH = 3
 RAPTOR_STOP_CLUSTERING_TOKENS = 1000
-RAPTOR_REBUILD_HOUR = 2             # 凌晨2点全量重建
-RAPTOR_REBUILD_LOOKBACK_HOURS = 24
+RAPTOR_BUILD_TIMEOUT_MINUTES = 30      # 超时未到齐则强制构建
+RAPTOR_REDIS_TTL_SECONDS = 3600        # Redis 缓冲区 TTL
+RAPTOR_GMM_PROB_THRESHOLD = 0.2        # GMM 软聚类概率阈值
+RAPTOR_UMAP_N_COMPONENTS = 5           # UMAP 降维目标维度
 RAPTOR_LLM_MAX_TOKENS = 600
 RAPTOR_LLM_BACKUP_TIMEOUT = 30
 ```
@@ -299,11 +343,11 @@ backend/
 ├── workers/tasks/
 │   └── raptor.py                       # NEW: RAPTOR Consumer 进程入口
 ├── workers/
-│   └── raptor_rebuilder.py             # NEW: Celery Beat 凌晨全量重建任务
+│   └── raptor_timeout_scanner.py       # NEW: Celery Beat 每10min扫Redis超时doc
 ├── services/raptor/                    # NEW
 │   ├── __init__.py
-│   ├── consumer.py                     # Kafka consumer + 增量构建调度
-│   ├── clusterer.py                    # k-means++ 聚类
+│   ├── consumer.py                     # Kafka consumer + Redis缓冲 + 齐套触发
+│   ├── clusterer.py                    # UMAP降维 + GMM软聚类
 │   ├── summarizer.py                   # LLM API 调用 (主/备 fallback)
 │   └── raptor_store.py                 # raptor_nodes CRUD
 ├── models/
@@ -325,11 +369,8 @@ backend/services/indexing/consumer.py   # MODIFY: 新增 mini-consumer 线程,
 ## 7. 自审清单
 
 - [x] 无 TODO / TBD / 未完成段落
-- [x] RAPTOR 不直接写 Milvus，通过 Kafka 由 #2 统一落库
-- [x] ES/Milvus 各单一 index/collection，`granularity` 字段逻辑隔离
-- [x] 增量流式 + 凌晨全量重构建，消除等待超时和累积误差
-- [x] k-means++ 固定 `random_state=42`，结果可复现
-- [x] 深度固定 ≤ 3 + token < 1000 自适应截断
-- [x] LLM 主备 fallback（DeepSeek → 通义千问）
-- [x] #2 不消费 RAPTOR 摘要语义；#5 检索层分别查询后组合
-- [x] raptor_nodes 使用 pgvector 存储向量，与 Milvus 同步
+- [x] UMAP + GMM 软聚类：一个 chunk 可属多个簇，解决企业文档多主题重叠
+- [x] Redis 齐套触发 + 超时 30min 兜底：不会因丢失 chunk 永不等齐，不会因增量导致 LLM 调用风暴
+- [x] 自底向上 Token 拦截：短文档不生成冗余摘要（total_tokens < 1000 → 直接不聚类）
+- [x] Kafka 消息带 `action` 字段（updated/deleted），#2 mini-consumer 正确处理删除语义
+- [x] 深度固定 ≤ 3；LLM 主备 fallback；raptor_nodes 用 pgvector 存向量
