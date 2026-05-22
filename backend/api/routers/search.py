@@ -106,7 +106,7 @@ async def search_answer(
     """Corrective RAG: search + relevance filter + LLM answer generation."""
     from core.config import settings
 
-    # Try real pipeline first
+    # Try real pipeline first (skip if no search infrastructure)
     try:
         from services.corrective_rag.relevance_checker import RelevanceChecker
         from services.corrective_rag.answer_generator import AnswerGenerator
@@ -117,13 +117,13 @@ async def search_answer(
             top_k=body.top_k,
             filters=body.filters.model_dump(exclude_none=True) if body.filters else None,
         )
-
         checker = RelevanceChecker()
         relevant = checker.filter(body.query, search_result["results"])
 
-        generator = AnswerGenerator()
-        result = await generator.generate(body.query, relevant)
-        return AnswerResponse(**result)
+        if relevant:  # Only use real pipeline if it returned actual results
+            generator = AnswerGenerator()
+            result = await generator.generate(body.query, relevant)
+            return AnswerResponse(**result)
 
     except Exception as e:
         logger.warning(f"Real pipeline failed ({e}), trying demo fallback")
