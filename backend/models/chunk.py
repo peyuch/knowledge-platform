@@ -3,7 +3,8 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import String, Integer, Boolean, Text, DateTime, ForeignKey, CheckConstraint
+import sqlalchemy as sa
+from sqlalchemy import String, Integer, Boolean, Text, DateTime, ForeignKey, CheckConstraint, Enum
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.dialects.postgresql import UUID, ARRAY
 
@@ -34,7 +35,10 @@ class Chunk(Base):
     )
 
     heading_level: Mapped[str] = mapped_column(String(4), nullable=False)
-    granularity: Mapped[ChunkGranularity] = mapped_column(nullable=False)
+    granularity: Mapped[ChunkGranularity] = mapped_column(
+        sa.Enum(ChunkGranularity, name="chunkgranularity", values_callable=lambda x: [e.value for e in x]),
+        nullable=False,
+    )
     heading_path: Mapped[list[str]] = mapped_column(
         ARRAY(Text), default=list, nullable=False
     )

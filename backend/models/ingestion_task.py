@@ -3,7 +3,8 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import String, SmallInteger, BigInteger, DateTime, Text, ForeignKey, CheckConstraint
+import sqlalchemy as sa
+from sqlalchemy import String, SmallInteger, BigInteger, DateTime, Text, ForeignKey, CheckConstraint, Enum
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 
@@ -39,7 +40,10 @@ class IngestionTask(Base):
     file_type: Mapped[str] = mapped_column(String(16), nullable=False)
     file_size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
-    status: Mapped[TaskStatus] = mapped_column(default=TaskStatus.PENDING, nullable=False)
+    status: Mapped[TaskStatus] = mapped_column(
+        sa.Enum(TaskStatus, name="taskstatus", values_callable=lambda x: [e.value for e in x]),
+        default=TaskStatus.PENDING, nullable=False,
+    )
     progress: Mapped[int] = mapped_column(SmallInteger, default=0)
     current_step: Mapped[str | None] = mapped_column(String(256), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)

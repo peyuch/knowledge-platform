@@ -60,7 +60,7 @@ class Settings(BaseSettings):
     raptor_backup_llm_model: str = "qwen-turbo"
 
     # Neo4j
-    neo4j_uri: str = "bolt://localhost:7687"
+    neo4j_uri: str = "bolt://localhost:17687"
     neo4j_user: str = "neo4j"
     neo4j_password: str = "password"
 

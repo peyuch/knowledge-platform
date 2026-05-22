@@ -32,15 +32,61 @@ async def upload_document(
     user: dict = Depends(get_current_user),
 ):
     """Upload a single document file. Returns task_id for status polling."""
+    import os, uuid as uuid_mod, json as json_mod
+    from datetime import datetime, timezone
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from core.config import settings
+
     content = await file.read()
     file_hash = sha256_hex(content)
-    task_id = str(uuid.uuid4())
+    meta_dict = json_mod.loads(metadata or "{}")
+    task_id = str(uuid_mod.uuid4())
+    doc_id = str(uuid_mod.uuid4())
+
+    # Save to local disk (MinIO alternative for quick demo)
+    safe_name = os.path.basename(file.filename) if file.filename else "upload.pdf"
+    os.makedirs("data/raw", exist_ok=True)
+    local_path = f"data/raw/{task_id}_{safe_name}"
+    with open(local_path, "wb") as f:
+        f.write(content)
+
+    # Insert ingestion task + document into PG
+    engine = create_engine(settings.database_url_sync)
+    Session = sessionmaker(bind=engine)
+    with Session() as db:
+        from models.document import Document
+        from models.ingestion_task import IngestionTask
+        from common.enums import TaskStatus
+
+        ext = safe_name.rsplit(".", 1)[-1].lower() if "." in safe_name else "pdf"
+        ft = ext if ext in ("pdf","docx","pptx","xlsx","txt","md","png","jpg","mp4","mp3") else "pdf"
+
+        doc = Document(
+            id=uuid_mod.UUID(doc_id), filename=safe_name, file_type=ft,
+            file_hash=file_hash, file_size_bytes=len(content),
+            raw_url=local_path, created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc),
+        )
+        db.add(doc)
+
+        task = IngestionTask(
+            id=uuid_mod.UUID(task_id), doc_id=uuid_mod.UUID(doc_id),
+            trace_id=str(uuid_mod.uuid4()), file_hash=file_hash,
+            original_filename=file.filename, file_type=ft,
+            file_size_bytes=len(content), status=TaskStatus.PENDING.value,
+            task_metadata=meta_dict, created_by=user.get("user_id",""),
+            created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc),
+        )
+        db.add(task)
+        db.commit()
+
+    # Dispatch Celery parse task
+    from workers.tasks.parse import parse_document
+    parse_document.apply_async(args=[task_id], queue="gpu_queue")
 
     return DocumentUploadResponse(
-        task_id=task_id,
-        file_hash=file_hash,
-        status="pending",
-        duplicate=False,
+        task_id=task_id, doc_id=doc_id, file_hash=file_hash,
+        status=TaskStatus.PENDING.value, duplicate=False,
     )
 
 
