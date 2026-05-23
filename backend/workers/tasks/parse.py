@@ -51,8 +51,11 @@ def parse_document(self, task_id: str):
                 task.current_step = "ASR 语音识别中"
 
             else:
+                from models.document import Document
+                doc = db.query(Document).get(task.doc_id)
+                raw_url = doc.raw_url if doc else ""
                 mineru = get_mineru_client()
-                mineru_task_id = mineru.submit(task.raw_url or "")
+                mineru_task_id = mineru.submit(raw_url or "")
                 task.mineru_task_id = mineru_task_id
                 task.current_step = "MinerU 解析中"
 

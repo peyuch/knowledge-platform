@@ -58,16 +58,23 @@ async def upload_document(
         from models.document import Document
         from models.ingestion_task import IngestionTask
         from common.enums import TaskStatus
+        from sqlalchemy import select
 
         ext = safe_name.rsplit(".", 1)[-1].lower() if "." in safe_name else "pdf"
         ft = ext if ext in ("pdf","docx","pptx","xlsx","txt","md","png","jpg","mp4","mp3") else "pdf"
 
-        doc = Document(
-            id=uuid_mod.UUID(doc_id), filename=safe_name, file_type=ft,
-            file_hash=file_hash, file_size_bytes=len(content),
-            raw_url=local_path, created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc),
-        )
-        db.add(doc)
+        # Check if document already exists by file_hash
+        existing = db.query(Document).filter(Document.file_hash == file_hash).first()
+        if existing:
+            doc_id = str(existing.id)
+        else:
+            doc = Document(
+                id=uuid_mod.UUID(doc_id), filename=safe_name, file_type=ft,
+                file_hash=file_hash, file_size_bytes=len(content),
+                raw_url=local_path, created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc),
+            )
+            db.add(doc)
+            db.flush()
 
         task = IngestionTask(
             id=uuid_mod.UUID(task_id), doc_id=uuid_mod.UUID(doc_id),

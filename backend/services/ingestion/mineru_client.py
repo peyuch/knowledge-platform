@@ -79,7 +79,7 @@ class MinerUClient:
 
     def __init__(self, api_url: str):
         self.api_url = api_url.rstrip("/")
-        self._client = httpx.Client(timeout=600)
+        self._client = httpx.Client(timeout=600, trust_env=False)  # bypass system proxy for localhost
 
     @retry(
         stop=stop_after_attempt(3),
