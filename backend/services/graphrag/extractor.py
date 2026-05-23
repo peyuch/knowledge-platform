@@ -72,7 +72,7 @@ class Extractor:
         return []
 
     async def _call_llm(self, url: str, key: str, model: str, prompt: str) -> str:
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with httpx.AsyncClient(timeout=60, trust_env=False) as client:
             resp = await client.post(
                 f"{url}/v1/chat/completions",
                 headers={"Authorization": f"Bearer {key}"},

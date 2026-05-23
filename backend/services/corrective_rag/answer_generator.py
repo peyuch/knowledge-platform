@@ -123,7 +123,7 @@ class AnswerGenerator:
         """Call the LLM API and parse the JSON response."""
         user_prompt = ANSWER_USER_TEMPLATE.format(contexts=contexts, query=query)
 
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with httpx.AsyncClient(timeout=60, trust_env=False) as client:
             resp = await client.post(
                 f"{settings.graphrag_llm_api_url}/v1/chat/completions",
                 headers={

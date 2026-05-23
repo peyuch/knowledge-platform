@@ -23,7 +23,7 @@ class LLMClient:
         self.model = model
 
     async def complete(self, prompt: str, max_tokens: int = RAPTOR_LLM_MAX_TOKENS) -> str:
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with httpx.AsyncClient(timeout=60, trust_env=False) as client:
             resp = await client.post(
                 f"{self.api_url}/v1/chat/completions",
                 headers={
